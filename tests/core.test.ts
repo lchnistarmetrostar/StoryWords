@@ -14,6 +14,8 @@ import {
   submitAnswer,
 } from "../src/lib/learning.ts";
 import type { ContentSource, ReadyLesson } from "../src/types/contracts.ts";
+import { getLocalDateKey, normalizeDailyPlan, setDailyTarget, recordDailyCompletion, getDailySummary } from "../src/lib/daily-plan.ts";
+import { parseByokConfig } from "../src/lib/byok.ts";
 
 function lesson(index = 0, source: ContentSource = "demo"): ReadyLesson {
   const entry = TARGET_WORDS[index];
@@ -166,4 +168,148 @@ test("every advertised familiar word is accepted by the same vocabulary checker"
     const result = checkStoryVocabulary({ title: "The House", text: `Mia sees a lantern. ${word}` }, []);
     assert.deepEqual(result.unknownWords, [], `Familiar word rejected: ${word}`);
   }
+});
+
+const today = new Date(2026, 10, 8, 0, 5);
+const tomorrow = new Date(2026, 10, 9, 0, 5);
+
+test("daily upgrade and malformed plans never invent today's completions", () => {
+  for (const raw of [null, {}, { version: 2 }, { version: 1, date: "2026-02-31", target: 3, completedWordIds: [], seenWordIds: [] }]) {
+    const plan = normalizeDailyPlan(raw, ["lantern", "envelope"], today);
+    assert.deepEqual(plan.completedWordIds, []);
+    assert.deepEqual(plan.seenWordIds, ["lantern", "envelope"]);
+    assert.equal(plan.target, 3);
+  }
+  const eight = TARGET_WORDS.slice(0, 8).map(word => word.id);
+  assert.equal(normalizeDailyPlan(null, eight, today).target, 2);
+  const all = TARGET_WORDS.map(word => word.id);
+  const complete = getDailySummary(normalizeDailyPlan(null, all, today), all, today);
+  assert.equal(complete.target, 0);
+  assert.equal(complete.completedToday, 0);
+  assert.equal(complete.courseCompleted, true);
+});
+
+test("daily target accepts only integers within actual available words and preserves history", () => {
+  const plan = normalizeDailyPlan(null, [], today);
+  for (const target of [1, 3, 5, 10]) assert.equal(setDailyTarget(plan, target, [], today).target, target);
+  for (const target of [0, -1, 11, 2.5, NaN, Infinity]) assert.throws(() => setDailyTarget(plan, target, [], today));
+  assert.throws(() => setDailyTarget(plan, 5, TARGET_WORDS.slice(0, 8).map(word => word.id), today));
+  const all = TARGET_WORDS.map(word => word.id);
+  assert.equal(setDailyTarget(plan, 0, all, today).target, 0);
+  assert.throws(() => setDailyTarget(plan, 1, all, today));
+});
+
+test("only a real first correct completion counts; incorrect, repeats, refresh and reset do not", () => {
+  const before = acceptLesson(createInitialState(), lesson());
+  const plan = normalizeDailyPlan(null, [], today);
+  const wrong = recordDailyCompletion(plan, before, submitAnswer(before, "b"), today);
+  assert.deepEqual(wrong.completedWordIds, []);
+  const result = submitAnswer(before, "a");
+  const after = recordDailyCompletion(plan, before, result, today);
+  assert.deepEqual(after.completedWordIds, ["lantern"]);
+  assert.deepEqual(plan.completedWordIds, []);
+  assert.deepEqual(recordDailyCompletion(after, before, result, today), after);
+  assert.deepEqual(recordDailyCompletion(after, result.state, submitAnswer(result.state, "a"), today), after);
+  assert.deepEqual(normalizeDailyPlan(after, result.state.learnedWordIds, today), after);
+  const resetPlan = normalizeDailyPlan(after, [], today);
+  assert.deepEqual(recordDailyCompletion(resetPlan, before, result, today), after);
+  assert.throws(() => recordDailyCompletion(plan, before, { status: "correct", state: before }, today));
+});
+
+test("achieving or editing a target does not cap genuine completions or change course progress", () => {
+  let state = createInitialState();
+  let plan = setDailyTarget(normalizeDailyPlan(null, [], today), 1, [], today);
+  for (let index = 0; index < 2; index++) {
+    const before = acceptLesson(state, lesson(index));
+    const result = submitAnswer(before, before.currentLesson!.quiz.correctOptionId);
+    plan = recordDailyCompletion(plan, before, result, today);
+    state = result.state;
+  }
+  const summary = getDailySummary(plan, state.learnedWordIds, today);
+  assert.equal(summary.goalReached, true);
+  assert.equal(summary.completedToday, 2);
+  assert.equal(summary.maxTarget, 10);
+  assert.equal(summary.remainingToTarget, 0);
+  const changed = setDailyTarget(plan, 5, state.learnedWordIds, today);
+  assert.deepEqual(changed.completedWordIds, ["lantern", "envelope"]);
+  assert.equal(getDailySummary(changed, state.learnedWordIds, today).remainingToTarget, 3);
+  assert.deepEqual(state.learnedWordIds, ["lantern", "envelope"]);
+});
+
+test("midnight uses local calendar dates and retains lifetime deduplication", () => {
+  const timezone = process.env.TZ;
+  process.env.TZ = "Asia/Shanghai";
+  try { assert.equal(getLocalDateKey(new Date("2026-11-07T16:05:00Z")), "2026-11-08"); }
+  finally { if (timezone === undefined) delete process.env.TZ; else process.env.TZ = timezone; }
+  const before = acceptLesson(createInitialState(), lesson());
+  const result = submitAnswer(before, "a");
+  const plan = recordDailyCompletion(normalizeDailyPlan(null, [], today), before, result, today);
+  const nextDay = normalizeDailyPlan(plan, ["lantern"], tomorrow);
+  assert.deepEqual(nextDay.completedWordIds, []);
+  assert.deepEqual(nextDay.seenWordIds, ["lantern"]);
+  assert.deepEqual(recordDailyCompletion(nextDay, before, result, tomorrow).completedWordIds, []);
+  const second = acceptLesson(result.state, lesson(1));
+  const afterMidnight = recordDailyCompletion(plan, second, submitAnswer(second, second.currentLesson!.quiz.correctOptionId), tomorrow);
+  assert.equal(afterMidnight.date, getLocalDateKey(tomorrow));
+  assert.deepEqual(afterMidnight.completedWordIds, ["envelope"]);
+});
+
+test("daily storage parsing strips extra fields and rejects unknown or duplicate word records", () => {
+  const plan = normalizeDailyPlan(null, [], today);
+  assert.deepEqual(normalizeDailyPlan({ ...plan, ai: { apiKey: "never-store-test" } }, [], today), plan);
+  for (const change of [{ seenWordIds: ["alien"] }, { seenWordIds: ["lantern", "lantern"] }, { completedWordIds: ["lantern"] }]) {
+    assert.deepEqual(normalizeDailyPlan({ ...plan, ...change }, [], today), plan);
+  }
+  assert.throws(() => normalizeDailyPlan(plan, ["envelope"], today));
+});
+
+test("ten genuine completions finish today, and replaying after midnight creates no new words", () => {
+  let state = createInitialState();
+  let plan = normalizeDailyPlan(null, [], today);
+  for (let index = 0; index < TARGET_WORDS.length; index++) {
+    const before = acceptLesson(state, lesson(index));
+    const result = submitAnswer(before, before.currentLesson!.quiz.correctOptionId);
+    plan = recordDailyCompletion(plan, before, result, today);
+    state = result.state;
+  }
+  assert.equal(getDailySummary(plan, state.learnedWordIds, today).completedToday, 10);
+  assert.equal(getDailySummary(plan, state.learnedWordIds, today).availableNewWords, 0);
+  plan = normalizeDailyPlan(plan, state.learnedWordIds, tomorrow);
+  assert.equal(plan.target, 0);
+  state = createInitialState();
+  for (let index = 0; index < TARGET_WORDS.length; index++) {
+    const before = acceptLesson(state, lesson(index));
+    const result = submitAnswer(before, before.currentLesson!.quiz.correctOptionId);
+    plan = recordDailyCompletion(plan, before, result, tomorrow);
+    state = result.state;
+  }
+  assert.deepEqual(plan.completedWordIds, []);
+  assert.equal(getDailySummary(plan, state.learnedWordIds, tomorrow).courseCompleted, true);
+});
+
+test("daily completion rejects valid saves that do not belong to this specific answer", () => {
+  const before = acceptLesson(createInitialState(), lesson());
+  const one = submitAnswer(before, before.currentLesson!.quiz.correctOptionId).state;
+  const second = acceptLesson(one, lesson(1));
+  const two = submitAnswer(second, second.currentLesson!.quiz.correctOptionId).state;
+  const altered = { ...one, episodes: [{ ...one.episodes[0], lessonId: "other-valid-id" }] };
+  const ai = { ...one, mode: "ai", episodes: one.episodes.map(episode => ({ ...episode, source: "ai" })) };
+  const plan = normalizeDailyPlan(null, [], today);
+  for (const candidate of [two, altered, ai]) {
+    const valid = parseLearningState(candidate);
+    assert.throws(() => recordDailyCompletion(plan, before, { status: "correct", state: valid }, today), /Invalid completion transition/);
+  }
+});
+
+test("BYOK accepts only official provider config and keeps credentials outside course parsing", () => {
+  const config = { provider: "deepseek", model: " deepseek-flash ", apiKey: " fake-personal-key " };
+  assert.deepEqual(parseByokConfig(config), { provider: "deepseek", model: "deepseek-flash", apiKey: "fake-personal-key" });
+  assert.equal(parseByokConfig({ ...config, provider: "openai", model: "gpt-4o-mini" }).provider, "openai");
+  for (const change of [{ provider: "proxy" }, { baseUrl: "https://example.invalid" }, { model: "../evil" }, { model: "a".repeat(101) }, { apiKey: "" }, { apiKey: "with space" }, { apiKey: "x".repeat(513) }, { apiKey: "line\r\nbreak" }]) {
+    assert.throws(() => parseByokConfig({ ...config, ...change }), { message: "Invalid AI configuration" });
+  }
+  const request = buildLessonRequest(createInitialState("ai"));
+  assert.deepEqual(parseLessonRequest({ ...request, ai: parseByokConfig(config) }), request);
+  const state = createInitialState("ai");
+  assert.deepEqual(parseLearningState({ ...state, ai: parseByokConfig(config) }), state);
 });

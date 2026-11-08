@@ -5,7 +5,11 @@ import { acceptLesson, createInitialState, STORAGE_KEY, submitAnswer } from "../
 import { clearProgress, loadProgress, saveProgress } from "../src/lib/storage.ts";
 import type { ReadyLesson } from "../src/types/contracts.ts";
 import { requestLesson } from "../src/components/lesson-request.ts";
-import { storyExample } from "../src/components/word-display.ts";
+import { chooseEnglishVoice, storyExample } from "../src/components/word-display.ts";
+import { loadDailyProgress, saveDailyProgress } from "../src/lib/daily-plan-storage.ts";
+import { DAILY_PLAN_STORAGE_KEY, normalizeDailyPlan, recordDailyCompletion } from "../src/lib/daily-plan.ts";
+
+const fakeAi = { provider: "deepseek" as const, model: "deepseek-chat", apiKey: "test-only-not-a-real-key" };
 
 function memoryStorage(initial: string | null = null) {
   const values = new Map<string, string>([["unrelated.setting", "keep"]]);
@@ -157,7 +161,7 @@ test("network, non-JSON and API failures retain progress without switching from 
   ];
   for (const response of responses) {
     const fetchMock = t.mock.method(globalThis, "fetch", response);
-    await assert.rejects(requestLesson(state, new AbortController().signal), (error: Error) => {
+    await assert.rejects(requestLesson(state, new AbortController().signal, fakeAi), (error: Error) => {
       assert.doesNotMatch(error.message, /private|<html>/);
       assert.match(error.message, /网络|服务|AI/);
       return true;
@@ -171,7 +175,7 @@ test("network, non-JSON and API failures retain progress without switching from 
 test("wrong-mode or malformed success responses cannot become saved courses", async (t) => {
   for (const raw of [pendingLesson(), { status: "completed" }, { status: "ready" }]) {
     const fetchMock = t.mock.method(globalThis, "fetch", async () => Response.json(raw));
-    await assert.rejects(requestLesson(createInitialState("ai"), new AbortController().signal));
+    await assert.rejects(requestLesson(createInitialState("ai"), new AbortController().signal, fakeAi));
     fetchMock.mock.restore();
   }
 });
@@ -190,4 +194,86 @@ test("word examples come from the actual story, matching the full target word wi
   assert.equal(storyExample("The shadows moved. A shadow was on the wall!", "shadow"), "A shadow was on the wall!");
   assert.equal(storyExample("Mia held a lantern", "lantern"), "Mia held a lantern");
   assert.equal(storyExample("Mia saw the house.", "lantern"), "");
+});
+
+test("pronunciation uses an available English voice, preferring local English without choosing another language", () => {
+  const chinese = { lang: "zh-CN", localService: true };
+  const remote = { lang: "en-GB", localService: false };
+  const localUS = { lang: "en-US", localService: true };
+  const localGB = { lang: "en-GB", localService: true };
+  assert.equal(chooseEnglishVoice([chinese]), undefined);
+  assert.equal(chooseEnglishVoice([]), undefined);
+  assert.equal(chooseEnglishVoice([chinese, remote]), remote);
+  assert.equal(chooseEnglishVoice([remote, localUS]), localUS);
+  assert.equal(chooseEnglishVoice([remote, localUS, localGB]), localGB);
+  assert.equal(chooseEnglishVoice([{ lang: "eng", localService: true }]), undefined);
+});
+
+test("daily storage restores separately without writing on load or inventing old-course completions", () => {
+  const now = new Date(2026, 10, 8, 12);
+  const storage = memoryStorage();
+  const loaded = loadDailyProgress(["lantern"], storage, now);
+  assert.equal(loaded.status, "empty");
+  assert.deepEqual(loaded.plan.completedWordIds, []);
+  assert.deepEqual(loaded.plan.seenWordIds, ["lantern"]);
+  assert.equal(storage.values.has(DAILY_PLAN_STORAGE_KEY), false);
+  assert.equal(saveDailyProgress(loaded.plan, ["lantern"], storage, now), true);
+  assert.deepEqual(loadDailyProgress(["lantern"], storage, now).plan, loaded.plan);
+  clearProgress(storage);
+  assert.ok(storage.values.has(DAILY_PLAN_STORAGE_KEY));
+});
+
+test("bad or unavailable daily storage preserves its data and write failures are explicit", () => {
+  const now = new Date(2026, 10, 8, 12);
+  const storage = memoryStorage();
+  storage.values.set(DAILY_PLAN_STORAGE_KEY, "{broken");
+  assert.equal(loadDailyProgress([], storage, now).status, "invalid");
+  assert.equal(storage.values.get(DAILY_PLAN_STORAGE_KEY), "{broken");
+  assert.equal(loadDailyProgress([], { getItem() { throw new Error("blocked"); } }, now).status, "unavailable");
+  assert.equal(saveDailyProgress(normalizeDailyPlan(null, [], now), [], { setItem() { throw new Error("quota"); } }, now), false);
+});
+
+test("daily storage round trips actual completion and normalizes a new local day without writing", () => {
+  const now = new Date(2026, 10, 8, 23, 59);
+  const before = acceptLesson(createInitialState(), pendingLesson());
+  const result = submitAnswer(before, "a");
+  const plan = recordDailyCompletion(normalizeDailyPlan(null, [], now), before, result, now);
+  const storage = memoryStorage();
+  assert.equal(saveDailyProgress(plan, result.state.learnedWordIds, storage, now), true);
+  const raw = storage.values.get(DAILY_PLAN_STORAGE_KEY);
+  const tomorrow = loadDailyProgress(result.state.learnedWordIds, storage, new Date(2026, 10, 9, 0, 1)).plan;
+  assert.deepEqual(tomorrow.completedWordIds, []);
+  assert.deepEqual(tomorrow.seenWordIds, ["lantern"]);
+  assert.equal(storage.values.get(DAILY_PLAN_STORAGE_KEY), raw);
+});
+
+test("BYOK is request-only: Demo strips configuration, AI requires it, responses and saves contain no credential", async (t) => {
+  const calls = t.mock.method(globalThis, "fetch", async (_url: unknown, options?: RequestInit) => {
+    const body = JSON.parse(String(options?.body));
+    if (body.mode === "demo") assert.equal(Object.hasOwn(body, "ai"), false);
+    else assert.deepEqual(body.ai, fakeAi);
+    return Response.json({ ...pendingLesson(), source: body.mode });
+  });
+  const controller = new AbortController();
+  const demo = await requestLesson(createInitialState(), controller.signal, fakeAi);
+  const ai = await requestLesson(createInitialState("ai"), controller.signal, fakeAi);
+  assert.equal(calls.mock.callCount(), 2);
+  await assert.rejects(requestLesson(createInitialState("ai"), controller.signal), /个人 API/);
+  assert.equal(calls.mock.callCount(), 2);
+  for (const state of [demo, ai]) {
+    assert.equal(JSON.stringify(state).includes(fakeAi.apiKey), false);
+    const storage = memoryStorage();
+    assert.equal(saveProgress(state, storage), true);
+    assert.equal(storage.values.get(STORAGE_KEY)?.includes(fakeAi.apiKey), false);
+  }
+});
+
+test("BYOK upstream errors never expose credential-like content or switch source", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => Response.json({ error: { code: "AI_UPSTREAM_ERROR", message: fakeAi.apiKey } }, { status: 502 }));
+  const state = createInitialState("ai");
+  await assert.rejects(requestLesson(state, new AbortController().signal, fakeAi), (error: Error) => {
+    assert.equal(error.message.includes(fakeAi.apiKey), false);
+    assert.deepEqual(state, createInitialState("ai"));
+    return true;
+  });
 });

@@ -1,20 +1,26 @@
 import { acceptLesson, buildLessonRequest, parseLessonResponse } from "../lib/learning.ts";
-import type { ApiErrorCode, LearningState } from "../types/contracts.ts";
+import { parseByokConfig } from "../lib/byok.ts";
+import type { ApiErrorCode, ByokConfig, LearningState, LessonTransportRequest } from "../types/contracts.ts";
 
 const errorMessages: Record<ApiErrorCode, string> = {
   INVALID_REQUEST: "当前进度暂时无法请求故事，请刷新页面恢复存档后重试。",
   PAYLOAD_TOO_LARGE: "上一章内容过长，故事服务暂时无法接续。当前进度已保留。",
-  AI_NOT_CONFIGURED: "真实 AI 尚未配置，请联系维护者完成配置后重试。也可重新开始，选择预置演示。",
+  AI_NOT_CONFIGURED: "请在“使用自己的 AI”中填写个人 API 配置后重试。当前进度和来源已保留。",
   RATE_LIMITED: "故事服务当前较忙，请稍后重试。",
   AI_TIMEOUT: "故事生成超时，请重试。当前进度已保留。",
-  AI_UPSTREAM_ERROR: "AI 服务暂时不可用，请稍后重试。",
+  AI_UPSTREAM_ERROR: "AI 请求未成功，请检查供应商、模型名称和个人密钥，或稍后重试。当前进度已保留。",
   INVALID_AI_OUTPUT: "AI 故事未通过内容检查，请重试。当前进度已保留。",
   INTERNAL_ERROR: "故事服务遇到问题，请稍后重试。",
 };
 
-export async function requestLesson(state: LearningState, signal: AbortSignal): Promise<LearningState> {
-  const request = buildLessonRequest(state);
+export async function requestLesson(state: LearningState, signal: AbortSignal, ai?: ByokConfig): Promise<LearningState> {
+  const request: LessonTransportRequest = buildLessonRequest(state);
   signal.throwIfAborted();
+  if (state.mode === "ai") {
+    if (!ai) throw new Error(errorMessages.AI_NOT_CONFIGURED);
+    try { request.ai = parseByokConfig(ai); }
+    catch { throw new Error("个人 API 配置无效，请检查供应商、模型名称和密钥后重试。"); }
+  }
   let response: Response;
   try {
     response = await fetch("/api/lesson", {

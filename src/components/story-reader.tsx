@@ -1,7 +1,7 @@
 import type { ContentSource, Story, Word } from "../types/contracts";
 
 export const sourceLabels: Record<ContentSource, string> = {
-  demo: "预置演示 · 非实时 AI",
+  demo: "预置内容 · 非实时 AI",
   ai: "真实 AI · 实时生成",
 };
 
@@ -26,8 +26,7 @@ export default function StoryReader({ story, word, source, chapter, onWordClick 
         <span className="source-label">{sourceLabels[source]}</span>
       </div>
       <p className="story-text" lang="en"><HighlightedText text={story.text} word={word.text} onWordClick={onWordClick} /></p>
-      <div className="story-end" aria-hidden="true"><span /><svg viewBox="0 0 16 16" fill="none" stroke="currentColor"><path d="m8 2 5 6-5 6-5-6Z" /></svg><span /></div>
-      <p className="reading-note">点击金色的 <span lang="en">{word.text}</span> 查看释义。让故事，帮你记住它。</p>
+      <p className="reading-note">点击有下划线的 <span lang="en">{word.text}</span> 查看释义。</p>
     </article>
   );
 }

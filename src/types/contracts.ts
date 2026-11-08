@@ -85,3 +85,33 @@ export interface AnswerResult {
   status: "correct" | "incorrect" | "no-active-lesson";
   state: LearningState;
 }
+
+// Request-only credentials: never put this object in LearningState or a browser save.
+export type ByokProvider = "deepseek" | "openai";
+export interface ByokConfig {
+  provider: ByokProvider;
+  model: string;
+  apiKey: string;
+}
+export interface LessonTransportRequest extends LessonRequest {
+  ai?: ByokConfig;
+}
+
+export interface DailyPlan {
+  version: 1;
+  date: string;
+  target: number;
+  completedWordIds: string[];
+  seenWordIds: string[];
+}
+
+export interface DailySummary {
+  plan: DailyPlan;
+  target: number;
+  completedToday: number;
+  remainingToTarget: number;
+  availableNewWords: number;
+  maxTarget: number;
+  goalReached: boolean;
+  courseCompleted: boolean;
+}
