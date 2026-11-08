@@ -8,7 +8,7 @@ AI 驱动的英语词汇学习 Web App：用熟悉的词读故事，每章学习
 
 ## 评审从这里开始
 
-1. **[打开在线预置 Demo](https://remix-careful-bob-prospects.trycloudflare.com/)**：无需账号和 API Key。当前公网展示预置故事，不是实时 AI；临时隧道可能在演示结束后失效。
+1. **[打开在线预置 Demo](https://handbags-electricity-yes-internship.trycloudflare.com/)**：无需账号和 API Key。当前公网展示预置故事，不是实时 AI；临时隧道可能在演示结束后失效。
 2. **离线体验**：[下载 demo.html](docs/demo.html)，点击 GitHub 的下载原始文件按钮，保存后用 Chrome/Edge 打开。单文件包含十章预置故事，无需联网。此文件保留此前验收的界面。
 3. **路演**：[九页幻灯片](docs/pitch.html) 同样下载后打开；方向键/空格翻页，F 全屏。图片和字体已内嵌，无 CDN。
 4. **查看源码并本地运行**：见下方命令。仓库源码包含新的午夜蓝前端；临时公网 Demo 仍是较早冻结的验收构建，外观可能不同。
